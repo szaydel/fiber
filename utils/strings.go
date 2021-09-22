@@ -12,7 +12,7 @@ func ToLower(b string) string {
 		res[i] = toLowerTable[res[i]]
 	}
 
-	return GetString(res)
+	return UnsafeString(res)
 }
 
 // ToUpper is the equivalent of strings.ToUpper
@@ -23,7 +23,7 @@ func ToUpper(b string) string {
 		res[i] = toUpperTable[res[i]]
 	}
 
-	return GetString(res)
+	return UnsafeString(res)
 }
 
 // TrimLeft is the equivalent of strings.TrimLeft
@@ -59,4 +59,18 @@ func TrimRight(s string, cutset byte) string {
 		lenStr--
 	}
 	return s[:lenStr]
+}
+
+// EqualFold the equivalent of strings.EqualFold
+func EqualFold(b, s string) (equals bool) {
+	n := len(b)
+	equals = n == len(s)
+	if equals {
+		for i := 0; i < n; i++ {
+			if equals = b[i]|0x20 == s[i]|0x20; !equals {
+				break
+			}
+		}
+	}
+	return
 }

@@ -1,30 +1,46 @@
-# Filesystem middleware
-Filesystem middleware for [Fiber](https://github.com/gofiber/fiber) that enables you to serve files from a directory. 
+# Filesystem Middleware
+
+Filesystem middleware for [Fiber](https://github.com/gofiber/fiber) that enables you to serve files from a directory.
 
 ⚠️ **`:params` & `:optionals?` within the prefix path are not supported!**
 
-### Table of Contents
-- [Signatures](#signatures)
-- [Examples](#examples)
-- [Config](#config)
-- [Default Config](#default-config)
+## Table of Contents
 
+- [Filesystem Middleware](#filesystem-middleware)
+	- [Table of Contents](#table-of-contents)
+	- [Signatures](#signatures)
+	- [Examples](#examples)
+		- [Config](#config)
+		- [embed](#embed)
+		- [pkger](#pkger)
+		- [packr](#packr)
+		- [go.rice](#gorice)
+		- [fileb0x](#fileb0x)
+		- [statik](#statik)
+	- [Config](#config-1)
+		- [Default Config](#default-config)
 
-### Signatures
+## Signatures
+
 ```go
 func New(config Config) fiber.Handler
 ```
 
-### Examples
-Import the middleware package that is part of the Fiber web framework
+## Examples
+
+First import the middleware from Fiber,
+
 ```go
 import (
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/filesystem"
+  "github.com/gofiber/fiber/v2"
+  "github.com/gofiber/fiber/v2/middleware/filesystem"
 )
 ```
 
-After you initiate your Fiber app, you can use the following possibilities:
+Then create a Fiber app with `app := fiber.New()`.
+
+### Config
+
 ```go
 // Provide a minimal config
 app.Use(filesystem.New(filesystem.Config{
@@ -34,14 +50,63 @@ app.Use(filesystem.New(filesystem.Config{
 // Or extend your config for customization
 app.Use(filesystem.New(filesystem.Config{
 	Root:         http.Dir("./assets"),
-	Index:        "index.html",
 	Browse:       true,
-	NotFoundFile: "404.html"
+	Index:        "index.html",
+	NotFoundFile: "404.html",
+	MaxAge:       3600,
 }))
 ```
 
-## pkger
-https://github.com/markbates/pkger
+> If your environment (Go 1.16+) supports it, we recommend using Go Embed instead of the other solutions listed as this one is native to Go and the easiest to use.
+
+### embed
+
+[Embed](https://golang.org/pkg/embed/) is the native method to embed files in a Golang excecutable. Introduced in Go 1.16.
+
+```go
+package main
+
+import (
+	"embed"
+	"io/fs"
+	"log"
+	"net/http"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/filesystem"
+)
+
+// Embed a single file
+//go:embed index.html
+var f embed.FS
+
+// Embed a directory
+//go:embed static/*
+var embedDirStatic embed.FS
+
+func main() {
+	app := fiber.New()
+
+	app.Use("/", filesystem.New(filesystem.Config{
+		Root: http.FS(f),
+	}))
+
+	// Access file "image.png" under `static/` directory via URL: `http://<server>/static/image.png`.
+	// Without `PathPrefix`, you have to access it via URL:
+	// `http://<server>/static/static/image.png`.
+	app.Use("/static", filesystem.New(filesystem.Config{
+		Root: http.FS(embedDirStatic),
+		PathPrefix: "static"
+		Browse: true,
+	}))
+
+	log.Fatal(app.Listen(":3000"))
+}
+```
+
+### pkger
+
+[Pkger](https://github.com/markbates/pkger) can be used to embed files in a Golang excecutable.
 
 ```go
 package main
@@ -64,8 +129,9 @@ func main() {
 }
 ```
 
-## packr
-https://github.com/gobuffalo/packr
+### packr
+
+[Packr](https://github.com/gobuffalo/packr) can be used to embed files in a Golang excecutable.
 
 ```go
 package main
@@ -88,7 +154,8 @@ func main() {
 }
 ```
 
-## go.rice
+### go.rice
+
 https://github.com/GeertJohan/go.rice
 
 ```go
@@ -112,8 +179,9 @@ func main() {
 }
 ```
 
-## fileb0x
-https://github.com/UnnoTed/fileb0x
+### fileb0x
+
+[Fileb0x](https://github.com/UnnoTed/fileb0x) can be used to embed files in a Golang excecutable.
 
 ```go
 package main
@@ -136,8 +204,9 @@ func main() {
 }
 ```
 
-## statik
-https://github.com/rakyll/statik
+### statik
+
+[Statik](https://github.com/rakyll/statik) can be used to embed files in a Golang excecutable.
 
 ```go
 package main
@@ -166,7 +235,8 @@ func main() {
 }
 ```
 
-### Config
+## Config
+
 ```go
 // Config defines the config for middleware.
 type Config struct {
@@ -179,31 +249,48 @@ type Config struct {
 	// to a collection of files and directories.
 	//
 	// Required. Default: nil
-	Root http.FileSystem
+	Root http.FileSystem `json:"-"`
 
-	// Index file for serving a directory.
+	// PathPrefix defines a prefix to be added to a filepath when
+	// reading a file from the FileSystem.
 	//
-	// Optional. Default: "index.html"
-	Index string
+	// Use when using Go 1.16 embed.FS
+	//
+	// Optional. Default ""
+	PathPrefix string `json:"path_prefix"`
 
 	// Enable directory browsing.
 	//
 	// Optional. Default: false
-	Browse bool
+	Browse bool `json:"browse"`
+
+	// Index file for serving a directory.
+	//
+	// Optional. Default: "index.html"
+	Index string `json:"index"`
+
+	// The value for the Cache-Control HTTP-header
+	// that is set on the file response. MaxAge is defined in seconds.
+	//
+	// Optional. Default value 0.
+	MaxAge    int `json:"max_age"`
 
 	// File to return if path is not found. Useful for SPA's.
 	//
 	// Optional. Default: ""
-	NotFoundFile string
+	NotFoundFile string `json:"not_found_file"`
 }
 ```
 
 ### Default Config
+
 ```go
 var ConfigDefault = Config{
-	Next:   nil,
-	Root:   nil,
-	Index:  "/index.html",
-	Browse: false,
+	Next:       nil,
+	Root:       nil,
+	PathPrefix: "",
+	Browse:     false,
+	Index:      "/index.html",
+	MaxAge:     0,
 }
 ```

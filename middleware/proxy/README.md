@@ -1,22 +1,26 @@
 # Proxy
+
 Proxy middleware for [Fiber](https://github.com/gofiber/fiber) that allows you to proxy requests to multiple servers.
 
 ### Table of Contents
+
 - [Signatures](#signatures)
 - [Examples](#examples)
 - [Config](#config)
 - [Default Config](#default-config)
 
-
 ### Signatures
+
 ```go
 func Balancer(config Config) fiber.Handler
 func Forward(addr string) fiber.Handler
-func Do(c *fiber.Ctx, addr string) error 
+func Do(c *fiber.Ctx, addr string) error
 ```
 
 ### Examples
+
 Import the middleware package that is part of the Fiber web framework
+
 ```go
 import (
 	"github.com/gofiber/fiber/v2"
@@ -25,7 +29,14 @@ import (
 ```
 
 After you initiate your Fiber app, you can use the following possibilities:
+
 ```go
+// if target https site uses a self-signed certificate, you should
+// call WithTlsConfig before Do and Forward
+proxy.WithTlsConfig(&tls.Config{
+    InsecureSkipVerify: true,
+})
+
 // Forward to url
 app.Get("/gif", proxy.Forward("https://i.imgur.com/IWaBepg.gif"))
 
@@ -57,7 +68,7 @@ app.Use(proxy.Balancer(proxy.Config{
 		"http://localhost:3003",
 	},
 	ModifyRequest: func(c *fiber.Ctx) error {
-		c.Set("X-Real-IP", c.IP())
+		c.Request().Header.Add("X-Real-IP", c.IP())
 		return nil
 	},
 	ModifyResponse: func(c *fiber.Ctx) error {
@@ -68,6 +79,7 @@ app.Use(proxy.Balancer(proxy.Config{
 ```
 
 ### Config
+
 ```go
 // Config defines the config for middleware.
 type Config struct {
@@ -93,14 +105,34 @@ type Config struct {
 	//
 	// Optional. Default: nil
 	ModifyResponse fiber.Handler
+	
+	// Timeout is the request timeout used when calling the proxy client
+	//
+	// Optional. Default: 1 second
+	Timeout time.Duration
+
+	// Per-connection buffer size for requests' reading.
+	// This also limits the maximum header size.
+	// Increase this buffer if your clients send multi-KB RequestURIs
+	// and/or multi-KB headers (for example, BIG cookies).
+	ReadBufferSize int
+    
+	// Per-connection buffer size for responses' writing.
+	WriteBufferSize int
+
+	// tls config for the http client
+	TlsConfig *tls.Config
 }
 ```
 
 ### Default Config
+
 ```go
 // ConfigDefault is the default config
 var ConfigDefault = Config{
-	Next: nil,
+    Next:           nil,
+    ModifyRequest:  nil,
+    ModifyResponse: nil,
+    Timeout:        fasthttp.DefaultLBClientTimeout,
 }
-
 ```

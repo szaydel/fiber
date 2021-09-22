@@ -8,38 +8,13 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gofiber/fiber/v2/utils"
 	"github.com/valyala/fasthttp"
 )
-
-// go test -v -run=^$ -bench=Benchmark_Utils_RemoveNewLines -benchmem -count=4
-func Benchmark_Utils_RemoveNewLines(b *testing.B) {
-	withNL := "foo\r\nSet-Cookie:%20SESSIONID=MaliciousValue\r\n"
-	withoutNL := "foo  Set-Cookie:%20SESSIONID=MaliciousValue  "
-	expected := utils.SafeString(withoutNL)
-	var res string
-
-	b.Run("withNewlines", func(b *testing.B) {
-		b.ReportAllocs()
-		b.ResetTimer()
-		for n := 0; n < b.N; n++ {
-			res = removeNewLines(withNL)
-		}
-		utils.AssertEqual(b, expected, res)
-	})
-	b.Run("withoutNewlines", func(b *testing.B) {
-		b.ReportAllocs()
-		b.ResetTimer()
-		for n := 0; n < b.N; n++ {
-			res = removeNewLines(withoutNL)
-		}
-		utils.AssertEqual(b, expected, res)
-	})
-
-}
 
 // go test -v -run=Test_Utils_ -count=3
 func Test_Utils_ETag(t *testing.T) {
@@ -180,6 +155,12 @@ func Test_Utils_getGroupPath(t *testing.T) {
 
 	res = getGroupPath("/v1/api/", "/")
 	utils.AssertEqual(t, "/v1/api/", res)
+
+	res = getGroupPath("/v1/api", "group")
+	utils.AssertEqual(t, "/v1/api/group", res)
+
+	res = getGroupPath("/v1/api", "")
+	utils.AssertEqual(t, "/v1/api", res)
 }
 
 // go test -v -run=^$ -bench=Benchmark_Utils_ -benchmem -count=3
@@ -201,43 +182,19 @@ func Benchmark_Utils_Unescape(b *testing.B) {
 
 	for n := 0; n < b.N; n++ {
 		source := "/cr%C3%A9er"
-		pathBytes := getBytes(source)
+		pathBytes := utils.UnsafeBytes(source)
 		pathBytes = fasthttp.AppendUnquotedArg(dst[:0], pathBytes)
-		unescaped = getString(pathBytes)
+		unescaped = utils.UnsafeString(pathBytes)
 	}
 
 	utils.AssertEqual(b, "/créer", unescaped)
-}
-
-func Test_Utils_IPv6(t *testing.T) {
-	testCases := []struct {
-		string
-		bool
-	}{
-		{"::FFFF:C0A8:1:3000", true},
-		{"::FFFF:C0A8:0001:3000", true},
-		{"0000:0000:0000:0000:0000:FFFF:C0A8:1:3000", true},
-		{"::FFFF:C0A8:1%1:3000", true},
-		{"::FFFF:192.168.0.1:3000", true},
-		{"[::FFFF:C0A8:1]:3000", true},
-		{"[::FFFF:C0A8:1%1]:3000", true},
-		{":3000", false},
-		{"127.0.0.1:3000", false},
-		{"127.0.0.1:", false},
-		{"0.0.0.0:3000", false},
-		{"", false},
-	}
-
-	for _, c := range testCases {
-		utils.AssertEqual(t, c.bool, isIPv6(c.string))
-	}
 }
 
 func Test_Utils_Parse_Address(t *testing.T) {
 	testCases := []struct {
 		addr, host, port string
 	}{
-		{"[::]:3000", "[::]", "3000"},
+		{"[::1]:3000", "[::1]", "3000"},
 		{"127.0.0.1:3000", "127.0.0.1", "3000"},
 		{"/path/to/unix/socket", "/path/to/unix/socket", ""},
 	}
@@ -305,23 +262,23 @@ func Benchmark_Utils_IsNoCache(b *testing.B) {
 
 func Test_Utils_lnMetadata(t *testing.T) {
 	t.Run("closed listen", func(t *testing.T) {
-		ln, err := net.Listen("tcp", ":0")
+		ln, err := net.Listen(NetworkTCP, ":0")
 		utils.AssertEqual(t, nil, err)
 
 		utils.AssertEqual(t, nil, ln.Close())
 
-		addr, config := lnMetadata(ln)
+		addr, config := lnMetadata(NetworkTCP, ln)
 
 		utils.AssertEqual(t, ln.Addr().String(), addr)
 		utils.AssertEqual(t, true, config == nil)
 	})
 
 	t.Run("non tls", func(t *testing.T) {
-		ln, err := net.Listen("tcp", ":0")
+		ln, err := net.Listen(NetworkTCP, ":0")
 
 		utils.AssertEqual(t, nil, err)
 
-		addr, config := lnMetadata(ln)
+		addr, config := lnMetadata(NetworkTCP4, ln)
 
 		utils.AssertEqual(t, ln.Addr().String(), addr)
 		utils.AssertEqual(t, true, config == nil)
@@ -333,14 +290,60 @@ func Test_Utils_lnMetadata(t *testing.T) {
 
 		config := &tls.Config{Certificates: []tls.Certificate{cer}}
 
-		ln, err := net.Listen("tcp4", ":0")
+		ln, err := net.Listen(NetworkTCP4, ":0")
 		utils.AssertEqual(t, nil, err)
 
 		ln = tls.NewListener(ln, config)
 
-		addr, config := lnMetadata(ln)
+		addr, config := lnMetadata(NetworkTCP4, ln)
 
 		utils.AssertEqual(t, ln.Addr().String(), addr)
 		utils.AssertEqual(t, true, config != nil)
 	})
+}
+
+// go test -v -run=^$ -bench=Benchmark_SlashRecognition -benchmem -count=4
+func Benchmark_SlashRecognition(b *testing.B) {
+	search := "wtf/1234"
+	var result bool
+	b.Run("indexBytes", func(b *testing.B) {
+		result = false
+		for i := 0; i < b.N; i++ {
+			if strings.IndexByte(search, slashDelimiter) != -1 {
+				result = true
+			}
+		}
+		utils.AssertEqual(b, true, result)
+	})
+	b.Run("forEach", func(b *testing.B) {
+		result = false
+		c := int32(slashDelimiter)
+		for i := 0; i < b.N; i++ {
+			for _, b := range search {
+				if b == c {
+					result = true
+					break
+				}
+			}
+		}
+		utils.AssertEqual(b, true, result)
+	})
+	b.Run("IndexRune", func(b *testing.B) {
+		result = false
+		c := int32(slashDelimiter)
+		for i := 0; i < b.N; i++ {
+			result = IndexRune(search, c)
+
+		}
+		utils.AssertEqual(b, true, result)
+	})
+}
+
+func IndexRune(str string, needle int32) bool {
+	for _, b := range str {
+		if b == needle {
+			return true
+		}
+	}
+	return false
 }

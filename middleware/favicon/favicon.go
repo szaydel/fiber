@@ -2,6 +2,7 @@ package favicon
 
 import (
 	"io/ioutil"
+	"net/http"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
@@ -17,19 +18,30 @@ type Config struct {
 	// File holds the path to an actual favicon that will be cached
 	//
 	// Optional. Default: ""
-	File string
+	File string `json:"file"`
+
+	// FileSystem is an optional alternate filesystem to search for the favicon in.
+	// An example of this could be an embedded or network filesystem
+	//
+	// Optional. Default: nil
+	FileSystem http.FileSystem `json:"-"`
+
+	// CacheControl defines how the Cache-Control header in the response should be set
+	//
+	// Optional. Default: "public, max-age=31536000"
+	CacheControl string `json:"cache_control"`
 }
 
 // ConfigDefault is the default config
 var ConfigDefault = Config{
-	Next: nil,
-	File: "",
+	Next:         nil,
+	File:         "",
+	CacheControl: "public, max-age=31536000",
 }
 
 const (
 	hType  = "image/x-icon"
 	hAllow = "GET, HEAD, OPTIONS"
-	hCache = "public, max-age=31536000"
 	hZero  = "0"
 )
 
@@ -49,6 +61,9 @@ func New(config ...Config) fiber.Handler {
 		if cfg.File == "" {
 			cfg.File = ConfigDefault.File
 		}
+		if cfg.CacheControl == "" {
+			cfg.CacheControl = ConfigDefault.CacheControl
+		}
 	}
 
 	// Load icon if provided
@@ -58,9 +73,21 @@ func New(config ...Config) fiber.Handler {
 		iconLen string
 	)
 	if cfg.File != "" {
-		if icon, err = ioutil.ReadFile(cfg.File); err != nil {
-			panic(err)
+		// read from configured filesystem if present
+		if cfg.FileSystem != nil {
+			f, err := cfg.FileSystem.Open(cfg.File)
+			if err != nil {
+				panic(err)
+			}
+			if icon, err = ioutil.ReadAll(f); err != nil {
+				panic(err)
+			}
+		} else {
+			if icon, err = ioutil.ReadFile(cfg.File); err != nil {
+				panic(err)
+			}
 		}
+
 		iconLen = strconv.Itoa(len(icon))
 	}
 
@@ -92,7 +119,7 @@ func New(config ...Config) fiber.Handler {
 		if len(icon) > 0 {
 			c.Set(fiber.HeaderContentLength, iconLen)
 			c.Set(fiber.HeaderContentType, hType)
-			c.Set(fiber.HeaderCacheControl, hCache)
+			c.Set(fiber.HeaderCacheControl, cfg.CacheControl)
 			return c.Status(fiber.StatusOK).Send(icon)
 		}
 

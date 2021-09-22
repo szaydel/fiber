@@ -1,79 +1,56 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"fmt"
-	"strings"
-
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/utils"
 	"github.com/valyala/fasthttp"
+	"net/url"
+	"strings"
 )
-
-// Config defines the config for middleware.
-type Config struct {
-	// Next defines a function to skip this middleware when returned true.
-	//
-	// Optional. Default: nil
-	Next func(c *fiber.Ctx) bool
-
-	// Servers defines a list of <scheme>://<host> HTTP servers,
-	//
-	// which are used in a round-robin manner.
-	// i.e.: "https://foobar.com, http://www.foobar.com"
-	//
-	// Required
-	Servers []string
-
-	// ModifyRequest allows you to alter the request
-	//
-	// Optional. Default: nil
-	ModifyRequest fiber.Handler
-
-	// ModifyResponse allows you to alter the response
-	//
-	// Optional. Default: nil
-	ModifyResponse fiber.Handler
-}
-
-// ConfigDefault is the default config
-var ConfigDefault = Config{
-	Next:           nil,
-	ModifyRequest:  nil,
-	ModifyResponse: nil,
-}
 
 // New is deprecated
 func New(config Config) fiber.Handler {
-	fmt.Println("proxy.New is deprecated, please us proxy.Balancer instead")
+	fmt.Println("proxy.New is deprecated, please use proxy.Balancer instead")
 	return Balancer(config)
 }
 
 // Balancer creates a load balancer among multiple upstream servers
 func Balancer(config Config) fiber.Handler {
-	// Override config if provided
-	cfg := config
+	// Set default config
+	cfg := configDefault(config)
 
-	// Set default values
-	if cfg.Next == nil {
-		cfg.Next = ConfigDefault.Next
-	}
-	if len(cfg.Servers) == 0 {
-		panic("Servers cannot be empty")
-	}
-
-	client := fasthttp.Client{
-		NoDefaultUserAgentHeader: true,
-		DisablePathNormalizing:   true,
-	}
+	// Load balanced client
+	var lbc fasthttp.LBClient
+	// Set timeout
+	lbc.Timeout = cfg.Timeout
 
 	// Scheme must be provided, falls back to http
-	for i := 0; i < len(cfg.Servers); i++ {
-		if !strings.HasPrefix(cfg.Servers[i], "http") {
-			cfg.Servers[i] = "http://" + cfg.Servers[i]
+	// TODO add https support
+	for _, server := range cfg.Servers {
+		if !strings.HasPrefix(server, "http") {
+			server = "http://" + server
 		}
-	}
 
-	var counter = 0
+		u, err := url.Parse(server)
+		if err != nil {
+			panic(err)
+		}
+
+		client := &fasthttp.HostClient{
+			NoDefaultUserAgentHeader: true,
+			DisablePathNormalizing:   true,
+			Addr:                     u.Host,
+
+			ReadBufferSize:  config.ReadBufferSize,
+			WriteBufferSize: config.WriteBufferSize,
+
+			TLSConfig: config.TlsConfig,
+		}
+
+		lbc.Clients = append(lbc.Clients, client)
+	}
 
 	// Return new handler
 	return func(c *fiber.Ctx) (err error) {
@@ -96,20 +73,15 @@ func Balancer(config Config) fiber.Handler {
 			}
 		}
 
-		req.SetRequestURI(cfg.Servers[counter] + utils.UnsafeString(req.RequestURI()))
-
-		counter = (counter + 1) % len(cfg.Servers)
+		req.SetRequestURI(utils.UnsafeString(req.RequestURI()))
 
 		// Forward request
-		if err = client.Do(req, res); err != nil {
-			fmt.Println(err)
+		if err = lbc.Do(req, res); err != nil {
 			return err
 		}
 
 		// Don't proxy "Connection" header
 		res.Header.Del(fiber.HeaderConnection)
-
-		//fmt.Println(string(res.Header.ContentType()))
 
 		// Modify response
 		if cfg.ModifyResponse != nil {
@@ -126,6 +98,12 @@ func Balancer(config Config) fiber.Handler {
 var client = fasthttp.Client{
 	NoDefaultUserAgentHeader: true,
 	DisablePathNormalizing:   true,
+}
+
+// WithTlsConfig update http client with a user specified tls.config
+// This function should be called before Do and Forward.
+func WithTlsConfig(tlsConfig *tls.Config) {
+	client.TLSConfig = tlsConfig
 }
 
 // Forward performs the given http request and fills the given http response.

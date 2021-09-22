@@ -2,32 +2,22 @@ package recover
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-// Config defines the config for middleware.
-type Config struct {
-	// Next defines a function to skip this middleware when returned true.
-	//
-	// Optional. Default: nil
-	Next func(c *fiber.Ctx) bool
-}
-
-// ConfigDefault is the default config
-var ConfigDefault = Config{
-	Next: nil,
+func defaultStackTraceHandler(e interface{}) {
+	buf := make([]byte, defaultStackTraceBufLen)
+	buf = buf[:runtime.Stack(buf, false)]
+	_, _ = os.Stderr.WriteString(fmt.Sprintf("panic: %v\n%s\n", e, buf))
 }
 
 // New creates a new middleware handler
 func New(config ...Config) fiber.Handler {
 	// Set default config
-	cfg := ConfigDefault
-
-	// Override config if provided
-	if len(config) > 0 {
-		cfg = config[0]
-	}
+	cfg := configDefault(config...)
 
 	// Return new handler
 	return func(c *fiber.Ctx) (err error) {
@@ -39,6 +29,10 @@ func New(config ...Config) fiber.Handler {
 		// Catch panics
 		defer func() {
 			if r := recover(); r != nil {
+				if cfg.EnableStackTrace {
+					cfg.StackTraceHandler(r)
+				}
+
 				var ok bool
 				if err, ok = r.(error); !ok {
 					// Set error that will call the global error handler

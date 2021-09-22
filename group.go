@@ -7,6 +7,7 @@ package fiber
 import (
 	"fmt"
 	"reflect"
+	"sync/atomic"
 )
 
 // Group struct
@@ -15,7 +16,7 @@ type Group struct {
 	prefix string
 }
 
-// Mount attaches another app instance as a subrouter along a routing path.
+// Mount attaches another app instance as a sub-router along a routing path.
 // It's very useful to split up a large API as many independent routers and
 // compose them as a single service using Mount.
 func (grp *Group) Mount(prefix string, fiber *App) Router {
@@ -23,9 +24,12 @@ func (grp *Group) Mount(prefix string, fiber *App) Router {
 	for m := range stack {
 		for r := range stack[m] {
 			route := grp.app.copyRoute(stack[m][r])
-			grp.app.addRoute(route.Method, grp.app.addPrefixToRoute(prefix, route))
+			grp.app.addRoute(route.Method, grp.app.addPrefixToRoute(getGroupPath(grp.prefix, prefix), route))
 		}
 	}
+
+	atomic.AddUint32(&grp.app.handlerCount, fiber.handlerCount)
+
 	return grp
 }
 

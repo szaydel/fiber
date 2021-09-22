@@ -3,113 +3,109 @@
 package cache
 
 import (
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/utils"
 )
 
-// Config defines the config for middleware.
-type Config struct {
-	// Next defines a function to skip this middleware when returned true.
-	//
-	// Optional. Default: nil
-	Next func(c *fiber.Ctx) bool
+// timestampUpdatePeriod is the period which is used to check the cache expiration.
+// It should not be too long to provide more or less acceptable expiration error, and in the same
+// time it should not be too short to avoid overwhelming of the system
+const timestampUpdatePeriod = 300 * time.Millisecond
 
-	// Expiration is the time that an cached response will live
-	//
-	// Optional. Default: 5 * time.Minute
-	Expiration time.Duration
-}
-
-// ConfigDefault is the default config
-var ConfigDefault = Config{
-	Next:       nil,
-	Expiration: 5 * time.Minute,
-}
-
-// cache is the manager to store the cached responses
-type cache struct {
-	sync.RWMutex
-	entries    map[string]entry
-	expiration int64
-}
-
-// entry defines the cached response
-type entry struct {
-	body        []byte
-	contentType []byte
-	statusCode  int
-	expiration  int64
-}
-
-// Internal variables
-var (
-	db   *cache
-	once sync.Once
+// cache status
+// unreachable: when cache is bypass, or invalid
+// hit: cache is served
+// miss: do not have cache record
+const (
+	cacheUnreachable = "unreachable"
+	cacheHit         = "hit"
+	cacheMiss        = "miss"
 )
 
 // New creates a new middleware handler
 func New(config ...Config) fiber.Handler {
 	// Set default config
-	cfg := ConfigDefault
+	cfg := configDefault(config...)
 
-	// Override config if provided
-	if len(config) > 0 {
-		cfg = config[0]
-
-		// Set default values
-		if cfg.Next == nil {
-			cfg.Next = ConfigDefault.Next
-		}
-		if int(cfg.Expiration.Seconds()) == 0 {
-			cfg.Expiration = ConfigDefault.Expiration
+	// Nothing to cache
+	if int(cfg.Expiration.Seconds()) < 0 {
+		return func(c *fiber.Ctx) error {
+			return c.Next()
 		}
 	}
 
-	// Initialize db once
-	once.Do(func() {
-		db = &cache{
-			entries:    make(map[string]entry),
-			expiration: int64(cfg.Expiration.Seconds()),
+	var (
+		// Cache settings
+		mux        = &sync.RWMutex{}
+		timestamp  = uint64(time.Now().Unix())
+		expiration = uint64(cfg.Expiration.Seconds())
+	)
+	// Create manager to simplify storage operations ( see manager.go )
+	manager := newManager(cfg.Storage)
+
+	// Update timestamp every second
+	go func() {
+		for {
+			atomic.StoreUint64(&timestamp, uint64(time.Now().Unix()))
+			time.Sleep(timestampUpdatePeriod)
 		}
-		// Remove expired entries
-		go func() {
-			for {
-				time.Sleep(1 * time.Minute)
-				for k := range db.entries {
-					if time.Now().Unix() >= db.entries[k].expiration {
-						delete(db.entries, k)
-					}
-				}
-			}
-		}()
-	})
+	}()
 
 	// Return new handler
 	return func(c *fiber.Ctx) error {
-		// Don't execute middleware if Next returns true
-		if cfg.Next != nil && cfg.Next(c) {
-			return c.Next()
-		}
-
 		// Only cache GET methods
 		if c.Method() != fiber.MethodGet {
+			c.Set(cfg.CacheHeader, cacheUnreachable)
 			return c.Next()
 		}
 
 		// Get key from request
-		key := c.Path()
+		key := cfg.KeyGenerator(c)
 
-		// Fine cached entry
-		db.RLock()
-		resp, ok := db.entries[key]
-		db.RUnlock()
-		if ok {
+		// Get entry from pool
+		e := manager.get(key)
+
+		// Lock entry and unlock when finished
+		mux.Lock()
+		defer mux.Unlock()
+
+		// Get timestamp
+		ts := atomic.LoadUint64(&timestamp)
+
+		if e.exp != 0 && ts >= e.exp {
+			// Check if entry is expired
+			manager.delete(key)
+			// External storage saves body data with different key
+			if cfg.Storage != nil {
+				manager.delete(key + "_body")
+			}
+		} else if e.exp != 0 {
+			// Separate body value to avoid msgp serialization
+			// We can store raw bytes with Storage 👍
+			if cfg.Storage != nil {
+				e.body = manager.getRaw(key + "_body")
+			}
 			// Set response headers from cache
-			c.Response().SetBodyRaw(resp.body)
-			c.Response().SetStatusCode(resp.statusCode)
-			c.Response().Header.SetContentTypeBytes(resp.contentType)
+			c.Response().SetBodyRaw(e.body)
+			c.Response().SetStatusCode(e.status)
+			c.Response().Header.SetContentTypeBytes(e.ctype)
+			if len(e.cencoding) > 0 {
+				c.Response().Header.SetBytesV(fiber.HeaderContentEncoding, e.cencoding)
+			}
+			// Set Cache-Control header if enabled
+			if cfg.CacheControl {
+				maxAge := strconv.FormatUint(e.exp-ts, 10)
+				c.Set(fiber.HeaderCacheControl, "public, max-age="+maxAge)
+			}
+
+			c.Set(cfg.CacheHeader, cacheHit)
+
+			// Return response
 			return nil
 		}
 
@@ -118,15 +114,32 @@ func New(config ...Config) fiber.Handler {
 			return err
 		}
 
-		// Cache response
-		db.Lock()
-		db.entries[key] = entry{
-			body:        c.Response().Body(),
-			statusCode:  c.Response().StatusCode(),
-			contentType: c.Response().Header.ContentType(),
-			expiration:  time.Now().Unix() + db.expiration,
+		// Don't cache response if Next returns true
+		if cfg.Next != nil && cfg.Next(c) {
+			c.Set(cfg.CacheHeader, cacheUnreachable)
+			return nil
 		}
-		db.Unlock()
+
+		// Cache response
+		e.body = utils.CopyBytes(c.Response().Body())
+		e.status = c.Response().StatusCode()
+		e.ctype = utils.CopyBytes(c.Response().Header.ContentType())
+		e.cencoding = utils.CopyBytes(c.Response().Header.Peek(fiber.HeaderContentEncoding))
+		e.exp = ts + expiration
+
+		// For external Storage we store raw body separated
+		if cfg.Storage != nil {
+			manager.setRaw(key+"_body", e.body, cfg.Expiration)
+			// avoid body msgp encoding
+			e.body = nil
+			manager.set(key, e, cfg.Expiration)
+			manager.release(e)
+		} else {
+			// Store entry in memory
+			manager.set(key, e, cfg.Expiration)
+		}
+
+		c.Set(cfg.CacheHeader, cacheMiss)
 
 		// Finish response
 		return nil
