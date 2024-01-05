@@ -1,4 +1,4 @@
-// +build !aix,!darwin,!linux,!freebsd,!openbsd,!windows
+//go:build !aix && !darwin && !linux && !freebsd && !openbsd && !windows
 
 package net
 

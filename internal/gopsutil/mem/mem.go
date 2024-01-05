@@ -6,7 +6,8 @@ import (
 	"github.com/gofiber/fiber/v2/internal/gopsutil/common"
 )
 
-var invoke common.Invoker = common.Invoke{}
+//lint:ignore U1000 we need this elsewhere
+var invoke common.Invoker = common.Invoke{} //nolint:all
 
 // Memory usage statistics. Total, Available and Used contain numbers of bytes
 // for human consumption.
@@ -91,7 +92,7 @@ type SwapMemoryStat struct {
 
 	// Linux specific numbers
 	// https://www.kernel.org/doc/Documentation/cgroup-v2.txt
-	PgMajFault  uint64  `json:"pgmajfault"`
+	PgMajFault uint64 `json:"pgmajfault"`
 }
 
 func (m VirtualMemoryStat) String() string {

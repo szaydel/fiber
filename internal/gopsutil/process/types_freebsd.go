@@ -1,4 +1,4 @@
-// +build ignore
+//go:build ignore
 
 // We still need editing by hands.
 // go tool cgo -godefs types_freebsd.go | sed 's/\*int64/int64/' | sed 's/\*byte/int64/'  > process_freebsd_amd64.go

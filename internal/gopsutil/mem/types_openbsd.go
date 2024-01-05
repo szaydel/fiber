@@ -1,4 +1,4 @@
-// +build ignore
+//go:build ignore
 
 /*
 Input to cgo -godefs.

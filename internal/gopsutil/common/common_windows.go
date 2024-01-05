@@ -1,16 +1,18 @@
-// +build windows
+//go:build windows
 
 package common
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"unsafe"
 
-	"github.com/gofiber/fiber/v2/internal/wmi"
 	"golang.org/x/sys/windows"
+
+	"github.com/gofiber/fiber/v2/internal/wmi"
 )
 
 // for double values
@@ -70,6 +72,7 @@ var (
 	ProcNtWow64ReadVirtualMemory64       = ModNt.NewProc("NtWow64ReadVirtualMemory64")
 
 	PdhOpenQuery                = ModPdh.NewProc("PdhOpenQuery")
+	PdhAddEnglishCounterW       = ModPdh.NewProc("PdhAddEnglishCounterW")
 	PdhAddCounter               = ModPdh.NewProc("PdhAddCounterW")
 	PdhCollectQueryData         = ModPdh.NewProc("PdhCollectQueryData")
 	PdhGetFormattedCounterValue = ModPdh.NewProc("PdhGetFormattedCounterValue")
@@ -130,6 +133,62 @@ func CreateCounter(query windows.Handle, pname, cname string) (*CounterInfo, err
 	}, nil
 }
 
+// GetCounterValue get counter value from handle
+// adapted from https://github.com/mackerelio/mackerel-agent/
+func GetCounterValue(counter windows.Handle) (float64, error) {
+	var value PDH_FMT_COUNTERVALUE_DOUBLE
+	r, _, err := PdhGetFormattedCounterValue.Call(uintptr(counter), PDH_FMT_DOUBLE, uintptr(0), uintptr(unsafe.Pointer(&value)))
+	if r != 0 && r != PDH_INVALID_DATA {
+		return 0.0, err
+	}
+	return value.DoubleValue, nil
+}
+
+type Win32PerformanceCounter struct {
+	PostName    string
+	CounterName string
+	Query       windows.Handle
+	Counter     windows.Handle
+}
+
+func NewWin32PerformanceCounter(postName, counterName string) (*Win32PerformanceCounter, error) {
+	query, err := CreateQuery()
+	if err != nil {
+		return nil, err
+	}
+	counter := Win32PerformanceCounter{
+		Query:       query,
+		PostName:    postName,
+		CounterName: counterName,
+	}
+	r, _, err := PdhAddEnglishCounterW.Call(
+		uintptr(counter.Query),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(counter.CounterName))),
+		0,
+		uintptr(unsafe.Pointer(&counter.Counter)),
+	)
+	if r != 0 {
+		return nil, err
+	}
+	return &counter, nil
+}
+
+func (w *Win32PerformanceCounter) GetValue() (float64, error) {
+	r, _, err := PdhCollectQueryData.Call(uintptr(w.Query))
+	if r != 0 && err != nil {
+		if r == PDH_NO_DATA {
+			return 0.0, fmt.Errorf("%w: this counter has not data", err)
+		}
+		return 0.0, err
+	}
+
+	return GetCounterValue(w.Counter)
+}
+
+func ProcessorQueueLengthCounter() (*Win32PerformanceCounter, error) {
+	return NewWin32PerformanceCounter("processor_queue_length", `\System\Processor Queue Length`)
+}
+
 // WMIQueryWithContext - wraps wmi.Query with a timed-out context to avoid hanging
 func WMIQueryWithContext(ctx context.Context, query string, dst interface{}, connectServerArgs ...interface{}) error {
 	if _, ok := ctx.Deadline(); !ok {
@@ -152,9 +211,12 @@ func WMIQueryWithContext(ctx context.Context, query string, dst interface{}, con
 }
 
 // Convert paths using native DOS format like:
-//   "\Device\HarddiskVolume1\Windows\systemew\file.txt"
+//
+//	"\Device\HarddiskVolume1\Windows\systemew\file.txt"
+//
 // into:
-//   "C:\Windows\systemew\file.txt"
+//
+//	"C:\Windows\systemew\file.txt"
 func ConvertDOSPath(p string) string {
 	rawDrive := strings.Join(strings.Split(p, `\`)[:3], `\`)
 

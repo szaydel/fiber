@@ -1,5 +1,4 @@
-// +build darwin
-// +build cgo
+//go:build darwin && cgo
 
 package cpu
 
@@ -10,6 +9,7 @@ package cpu
 #include <mach/mach_init.h>
 #include <mach/mach_host.h>
 #include <mach/host_info.h>
+#include <TargetConditionals.h>
 #if TARGET_OS_MAC
 #include <libproc.h>
 #endif
@@ -107,5 +107,4 @@ func allCPUTimes() ([]TimesStat, error) {
 	}
 
 	return []TimesStat{c}, nil
-
 }

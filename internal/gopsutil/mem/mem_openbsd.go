@@ -1,4 +1,4 @@
-// +build openbsd
+//go:build openbsd
 
 package mem
 
@@ -10,8 +10,9 @@ import (
 	"fmt"
 	"os/exec"
 
-	"github.com/gofiber/fiber/v2/internal/gopsutil/common"
 	"golang.org/x/sys/unix"
+
+	"github.com/gofiber/fiber/v2/internal/gopsutil/common"
 )
 
 func GetPageSize() (uint64, error) {

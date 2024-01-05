@@ -1,105 +1,43 @@
 package csrf
 
 import (
-	"crypto/subtle"
 	"errors"
-	"strings"
+	"net/url"
+	"reflect"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/utils"
 )
 
-// Config defines the config for middleware.
-type Config struct {
-	// Next defines a function to skip this middleware when returned true.
-	//
-	// Optional. Default: nil
-	Next func(c *fiber.Ctx) bool
+var (
+	ErrTokenNotFound = errors.New("csrf token not found")
+	ErrTokenInvalid  = errors.New("csrf token invalid")
+	ErrNoReferer     = errors.New("referer not supplied")
+	ErrBadReferer    = errors.New("referer invalid")
+	dummyValue       = []byte{'+'}
+)
 
-	// TokenLookup is a string in the form of "<source>:<key>" that is used
-	// to extract token from the request.
-	//
-	// Optional. Default value "header:X-CSRF-Token".
-	// Possible values:
-	// - "header:<name>"
-	// - "query:<name>"
-	// - "param:<name>"
-	// - "form:<name>"
-	TokenLookup string
-
-	// Cookie
-	//
-	// Optional.
-	Cookie *fiber.Cookie
-
-	// CookieExpires is the duration before the cookie will expire
-	//
-	// Optional. Default: 24 * time.Hour
-	CookieExpires time.Duration
-
-	// Context key to store generated CSRF token into context.
-	//
-	// Optional. Default value "csrf".
-	ContextKey string
-}
-
-// ConfigDefault is the default config
-var ConfigDefault = Config{
-	Next:        nil,
-	TokenLookup: "header:X-CSRF-Token",
-	ContextKey:  "csrf",
-	Cookie: &fiber.Cookie{
-		Name:     "_csrf",
-		SameSite: "Strict",
-	},
-	CookieExpires: 24 * time.Hour,
+type CSRFHandler struct {
+	config         *Config
+	sessionManager *sessionManager
+	storageManager *storageManager
 }
 
 // New creates a new middleware handler
 func New(config ...Config) fiber.Handler {
 	// Set default config
-	cfg := ConfigDefault
+	cfg := configDefault(config...)
 
-	// Override config if provided
-	if len(config) > 0 {
-		cfg = config[0]
+	// Create manager to simplify storage operations ( see *_manager.go )
+	var sessionManager *sessionManager
+	var storageManager *storageManager
+	if cfg.Session != nil {
+		// Register the Token struct in the session store
+		cfg.Session.RegisterType(Token{})
 
-		// Set default values
-		if cfg.TokenLookup == "" {
-			cfg.TokenLookup = ConfigDefault.TokenLookup
-		}
-		if cfg.ContextKey == "" {
-			cfg.ContextKey = ConfigDefault.ContextKey
-		}
-		if cfg.Cookie == nil {
-			cfg.Cookie = ConfigDefault.Cookie
-			if cfg.Cookie.Name == "" {
-				cfg.Cookie.Name = "_csrf"
-			}
-		}
-		if cfg.CookieExpires == 0 {
-			cfg.CookieExpires = ConfigDefault.CookieExpires
-		}
-	}
-
-	// Generate the correct extractor to get the token from the correct location
-	selectors := strings.Split(cfg.TokenLookup, ":")
-
-	if len(selectors) != 2 {
-		panic("csrf: Token lookup must in the form of <source>:<key>")
-	}
-
-	// By default we extract from a header
-	extractor := csrfFromHeader(selectors[1])
-
-	switch selectors[0] {
-	case "form":
-		extractor = csrfFromForm(selectors[1])
-	case "query":
-		extractor = csrfFromQuery(selectors[1])
-	case "param":
-		extractor = csrfFromParam(selectors[1])
+		sessionManager = newSessionManager(cfg.Session, cfg.SessionKey)
+	} else {
+		storageManager = newStorageManager(cfg.Storage)
 	}
 
 	// Return new handler
@@ -109,101 +47,192 @@ func New(config ...Config) fiber.Handler {
 			return c.Next()
 		}
 
-		// Declare empty token and try to get previous generated CSRF from cookie
-		token, key := "", c.Cookies(cfg.Cookie.Name)
-
-		// Check if the cookie had a CSRF token
-		if key == "" {
-			// Create a new CSRF token
-			token = utils.UUID()
-		} else {
-			// Use the server generated token previously to compare
-			// To the extracted token later on
-			token = key
+		// Store the CSRF handler in the context if a context key is specified
+		if cfg.HandlerContextKey != "" {
+			c.Locals(cfg.HandlerContextKey, &CSRFHandler{
+				config:         &cfg,
+				sessionManager: sessionManager,
+				storageManager: storageManager,
+			})
 		}
 
-		// Verify CSRF token on POST requests
-		if c.Method() == fiber.MethodPost {
-			// Extract token from client request i.e. header, query, param or form
-			csrf, err := extractor(c)
+		var token string
+
+		// Action depends on the HTTP method
+		switch c.Method() {
+		case fiber.MethodGet, fiber.MethodHead, fiber.MethodOptions, fiber.MethodTrace:
+			cookieToken := c.Cookies(cfg.CookieName)
+
+			if cookieToken != "" {
+				raw := getRawFromStorage(c, cookieToken, cfg, sessionManager, storageManager)
+
+				if raw != nil {
+					token = cookieToken // Token is valid, safe to set it
+				}
+			}
+		default:
+			// Assume that anything not defined as 'safe' by RFC7231 needs protection
+
+			// Enforce an origin check for HTTPS connections.
+			if c.Protocol() == "https" {
+				if err := refererMatchesHost(c); err != nil {
+					return cfg.ErrorHandler(c, err)
+				}
+			}
+
+			// Extract token from client request i.e. header, query, param, form or cookie
+			extractedToken, err := cfg.Extractor(c)
 			if err != nil {
-				// We have a problem extracting the csrf token
-				return fiber.ErrForbidden
+				return cfg.ErrorHandler(c, err)
 			}
-			// Some magic to compare both cookie and client csrf token
-			if subtle.ConstantTimeCompare(utils.UnsafeBytes(token), utils.UnsafeBytes(csrf)) != 1 {
-				// Comparison failed, return forbidden
-				return fiber.ErrForbidden
+
+			if extractedToken == "" {
+				return cfg.ErrorHandler(c, ErrTokenNotFound)
+			}
+
+			// If not using CsrfFromCookie extractor, check that the token matches the cookie
+			// This is to prevent CSRF attacks by using a Double Submit Cookie method
+			// Useful when we do not have access to the users Session
+			if !isCsrfFromCookie(cfg.Extractor) && !compareStrings(extractedToken, c.Cookies(cfg.CookieName)) {
+				return cfg.ErrorHandler(c, ErrTokenInvalid)
+			}
+
+			raw := getRawFromStorage(c, extractedToken, cfg, sessionManager, storageManager)
+
+			if raw == nil {
+				// If token is not in storage, expire the cookie
+				expireCSRFCookie(c, cfg)
+				// and return an error
+				return cfg.ErrorHandler(c, ErrTokenNotFound)
+			}
+			if cfg.SingleUseToken {
+				// If token is single use, delete it from storage
+				deleteTokenFromStorage(c, extractedToken, cfg, sessionManager, storageManager)
+			} else {
+				token = extractedToken // Token is valid, safe to set it
 			}
 		}
 
-		// Create new cookie to send new CSRF token
-		cookie := &fiber.Cookie{
-			Name:     cfg.Cookie.Name,
-			Value:    token,
-			Domain:   cfg.Cookie.Domain,
-			Path:     cfg.Cookie.Path,
-			Expires:  time.Now().Add(cfg.CookieExpires),
-			Secure:   cfg.Cookie.Secure,
-			HTTPOnly: cfg.Cookie.HTTPOnly,
-			SameSite: cfg.Cookie.SameSite,
+		// Generate CSRF token if not exist
+		if token == "" {
+			// And generate a new token
+			token = cfg.KeyGenerator()
 		}
 
-		// Set cookie to response
-		c.Cookie(cookie)
+		// Create or extend the token in the storage
+		createOrExtendTokenInStorage(c, token, cfg, sessionManager, storageManager)
 
-		// Store token in context
-		c.Locals(cfg.ContextKey, token)
+		// Update the CSRF cookie
+		updateCSRFCookie(c, cfg, token)
 
-		// Protect clients from caching the response by telling the browser
-		// a new header value is generated
+		// Tell the browser that a new header value is generated
 		c.Vary(fiber.HeaderCookie)
+
+		// Store the token in the context if a context key is specified
+		if cfg.ContextKey != nil {
+			c.Locals(cfg.ContextKey, token)
+		}
 
 		// Continue stack
 		return c.Next()
 	}
 }
 
-// csrfFromHeader returns a function that extracts token from the request header.
-func csrfFromHeader(param string) func(c *fiber.Ctx) (string, error) {
-	return func(c *fiber.Ctx) (string, error) {
-		token := c.Get(param)
-		if token == "" {
-			return "", errors.New("missing csrf token in header")
-		}
-		return token, nil
+// getRawFromStorage returns the raw value from the storage for the given token
+// returns nil if the token does not exist, is expired or is invalid
+func getRawFromStorage(c *fiber.Ctx, token string, cfg Config, sessionManager *sessionManager, storageManager *storageManager) []byte {
+	if cfg.Session != nil {
+		return sessionManager.getRaw(c, token, dummyValue)
+	}
+	return storageManager.getRaw(token)
+}
+
+// createOrExtendTokenInStorage creates or extends the token in the storage
+func createOrExtendTokenInStorage(c *fiber.Ctx, token string, cfg Config, sessionManager *sessionManager, storageManager *storageManager) {
+	if cfg.Session != nil {
+		sessionManager.setRaw(c, token, dummyValue, cfg.Expiration)
+	} else {
+		storageManager.setRaw(token, dummyValue, cfg.Expiration)
 	}
 }
 
-// csrfFromQuery returns a function that extracts token from the query string.
-func csrfFromQuery(param string) func(c *fiber.Ctx) (string, error) {
-	return func(c *fiber.Ctx) (string, error) {
-		token := c.Query(param)
-		if token == "" {
-			return "", errors.New("missing csrf token in query string")
-		}
-		return token, nil
+func deleteTokenFromStorage(c *fiber.Ctx, token string, cfg Config, sessionManager *sessionManager, storageManager *storageManager) {
+	if cfg.Session != nil {
+		sessionManager.delRaw(c)
+	} else {
+		storageManager.delRaw(token)
 	}
 }
 
-// csrfFromParam returns a function that extracts token from the url param string.
-func csrfFromParam(param string) func(c *fiber.Ctx) (string, error) {
-	return func(c *fiber.Ctx) (string, error) {
-		token := c.Params(param)
-		if token == "" {
-			return "", errors.New("missing csrf token in url parameter")
-		}
-		return token, nil
-	}
+// Update CSRF cookie
+// if expireCookie is true, the cookie will expire immediately
+func updateCSRFCookie(c *fiber.Ctx, cfg Config, token string) {
+	setCSRFCookie(c, cfg, token, cfg.Expiration)
 }
 
-// csrfFromParam returns a function that extracts token from the url param string.
-func csrfFromForm(param string) func(c *fiber.Ctx) (string, error) {
-	return func(c *fiber.Ctx) (string, error) {
-		token := c.FormValue(param)
-		if token == "" {
-			return "", errors.New("missing csrf token in form parameter")
-		}
-		return token, nil
+func expireCSRFCookie(c *fiber.Ctx, cfg Config) {
+	setCSRFCookie(c, cfg, "", -time.Hour)
+}
+
+func setCSRFCookie(c *fiber.Ctx, cfg Config, token string, expiry time.Duration) {
+	cookie := &fiber.Cookie{
+		Name:        cfg.CookieName,
+		Value:       token,
+		Domain:      cfg.CookieDomain,
+		Path:        cfg.CookiePath,
+		Secure:      cfg.CookieSecure,
+		HTTPOnly:    cfg.CookieHTTPOnly,
+		SameSite:    cfg.CookieSameSite,
+		SessionOnly: cfg.CookieSessionOnly,
+		Expires:     time.Now().Add(expiry),
 	}
+
+	// Set the CSRF cookie to the response
+	c.Cookie(cookie)
+}
+
+// DeleteToken removes the token found in the context from the storage
+// and expires the CSRF cookie
+func (handler *CSRFHandler) DeleteToken(c *fiber.Ctx) error {
+	// Get the config from the context
+	config := handler.config
+	if config == nil {
+		panic("CSRFHandler config not found in context")
+	}
+	// Extract token from the client request cookie
+	cookieToken := c.Cookies(config.CookieName)
+	if cookieToken == "" {
+		return config.ErrorHandler(c, ErrTokenNotFound)
+	}
+	// Remove the token from storage
+	deleteTokenFromStorage(c, cookieToken, *config, handler.sessionManager, handler.storageManager)
+	// Expire the cookie
+	expireCSRFCookie(c, *config)
+	return nil
+}
+
+// isCsrfFromCookie checks if the extractor is set to ExtractFromCookie
+func isCsrfFromCookie(extractor interface{}) bool {
+	return reflect.ValueOf(extractor).Pointer() == reflect.ValueOf(CsrfFromCookie).Pointer()
+}
+
+// refererMatchesHost checks that the referer header matches the host header
+// returns an error if the referer header is not present or is invalid
+// returns nil if the referer header is valid
+func refererMatchesHost(c *fiber.Ctx) error {
+	referer := c.Get(fiber.HeaderReferer)
+	if referer == "" {
+		return ErrNoReferer
+	}
+
+	refererURL, err := url.Parse(referer)
+	if err != nil {
+		return ErrBadReferer
+	}
+
+	if refererURL.Scheme+"://"+refererURL.Host != c.Protocol()+"://"+c.Hostname() {
+		return ErrBadReferer
+	}
+
+	return nil
 }

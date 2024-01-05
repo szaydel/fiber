@@ -1,4 +1,4 @@
-// +build !darwin,!linux,!freebsd,!openbsd,!solaris,!windows
+//go:build !darwin && !linux && !freebsd && !openbsd && !solaris && !windows
 
 package mem
 

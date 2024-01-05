@@ -1,4 +1,4 @@
-// +build windows
+//go:build windows
 
 package mem
 
@@ -6,8 +6,9 @@ import (
 	"context"
 	"unsafe"
 
-	"github.com/gofiber/fiber/v2/internal/gopsutil/common"
 	"golang.org/x/sys/windows"
+
+	"github.com/gofiber/fiber/v2/internal/gopsutil/common"
 )
 
 var (
